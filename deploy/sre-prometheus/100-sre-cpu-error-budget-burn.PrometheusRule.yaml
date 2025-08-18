@@ -1,0 +1,120 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sre-cpu-error-budget-burn
+  namespace: openshift-monitoring
+  labels:
+    prometheus: sre-cpu-usage-alerts
+    role: alert-rules
+spec:
+  groups:
+  - name: sre-cpu-error-budget-burn.rules
+    interval: 30s
+    rules:
+    
+    # Recording rule: Calculate CPU usage percentage for nodes
+    - record: sre:node_cpu_usage_percent
+      expr: |
+        100 - (
+          avg by (instance) (
+            irate(node_cpu_seconds_total{mode="idle"}[5m])
+          ) * 100
+        )
+      labels:
+        alertname: "NodeCPUUsage"
+    
+    # Recording rule: Track time spent above 80% CPU in last 24h (in minutes)
+    - record: sre:cpu_high_usage_minutes_24h
+      expr: |
+        (
+          sum_over_time(
+            (sre:node_cpu_usage_percent > 80)[24h:1m]
+          ) / 60
+        )
+      labels:
+        alertname: "CPUHighUsageTime"
+    
+    # Main Alert: Fire when CPU > 80% for more than 2 hours in 24h window
+    - alert: CPUErrorBudgetBurn
+      expr: |
+        (
+          sum_over_time(
+            (sre:node_cpu_usage_percent > 80)[24h:1m]
+          ) / 60
+        ) > 120
+      for: 5m
+      labels:
+        severity: critical
+        alertname: CPUErrorBudgetBurn
+        service: cluster-infrastructure
+        namespace: openshift-monitoring
+      annotations:
+        summary: "CPU Error Budget Burn: High CPU usage detected"
+        description: |
+          CPU usage has exceeded 80% for more than 2 hours within the last 24 hours on {{ $labels.instance }}.
+          
+          Current CPU usage minutes above 80% in 24h window: {{ $value | humanizeDuration }}
+          Threshold: 120 minutes (2 hours)
+          
+          This indicates sustained high CPU pressure that may impact API server SLO.
+          SRE should investigate cluster capacity and consider node resizing.
+          
+          Instance: {{ $labels.instance }}
+          Current CPU usage: {{ with query "sre:node_cpu_usage_percent{instance=\"" }}{{ . | first | value | humanizePercentage }}{{ end }}
+    
+        # Alert for when we're approaching the error budget threshold
+    - alert: CPUErrorBudgetBurnWarning
+      expr: |
+        (
+          sum_over_time(
+            (sre:node_cpu_usage_percent > 80)[24h:1m]
+          ) / 60
+        ) > 90
+      for: 5m
+      labels:
+        severity: warning
+        alertname: CPUErrorBudgetBurnWarning
+        service: cluster-infrastructure
+        namespace: openshift-monitoring
+      annotations:
+        summary: "CPU Error Budget Burn Warning: Approaching threshold"
+        description: |
+          CPU usage has exceeded 80% for {{ $value | humanizeDuration }} within the last 24 hours on {{ $labels.instance }}.
+          
+          Warning threshold: 90 minutes (1.5 hours)
+          Critical threshold: 120 minutes (2 hours)
+          
+          If CPU usage continues above 80%, the critical alert will fire soon.
+          Consider proactive investigation or capacity planning.
+
+    # Alert for cluster-wide CPU pressure
+    - alert: ClusterCPUErrorBudgetBurn
+      expr: |
+        (
+          avg(
+            sum_over_time(
+              (sre:node_cpu_usage_percent > 80)[24h:1m]
+            ) / 60
+          )
+        ) > 120
+      for: 5m
+      labels:
+        severity: critical
+        alertname: ClusterCPUErrorBudgetBurn
+        service: cluster-infrastructure
+        namespace: openshift-monitoring
+      annotations:
+        summary: "Cluster-wide CPU Error Budget Burn detected"
+        description: |
+          Multiple nodes in the cluster have exceeded 80% CPU usage for more than 2 hours 
+          within the last 24 hours. Average high-usage time: {{ $value | humanizeDuration }}
+          
+          This indicates cluster-wide resource pressure that may significantly impact 
+          API server SLO and overall cluster performance.
+          
+          Immediate SRE intervention required:
+          - Investigate cluster capacity
+          - Consider adding nodes or resizing existing nodes
+          - Check for resource-intensive workloads
+          
+          Threshold: 120 minutes (2 hours)
